@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>大文件上传Demo</title>
+  <style>
+    .progress-container {
+      width: 100%;
+      background-color: #f3f3f3;
+      margin-top: 10px;
+    }
+
+    .progress-bar {
+      height: 20px;
+      background-color: #4CAF50;
+      text-align: center;
+      line-height: 20px;
+      color: white;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>大文件上传Demo</h1>
+
+  <!-- 文件选择控件 -->
+  <input type="file" id="fileInput">
+
+  <!-- 上传按钮 -->
+  <button id="uploadBtn">上传文件</button>
+
+  <!-- 暂停按钮 -->
+  <button id="pauseBtn" disabled>暂停上传</button>
+
+  <!-- 继续按钮 -->
+  <button id="resumeBtn" disabled>继续上传</button>
+
+  <!-- 进度条 -->
+  <div class="progress-container">
+    <div id="progressBar" class="progress-bar" style="width: 0%">0%</div>
+  </div>
+
+  <!-- 上传状态信息 -->
+  <div id="status"></div>
+
+  <script>
+    // 全局变量，用于存储上传状态
+    let file = null;
+    let fileSize = 0;
+    let fileName = '';
+    let fileHash = '';
+    let chunkSize = 5 * 1024 * 1024; // 每个分片5MB
+    let totalChunks = 0;
+    let uploadedChunks = 0;
+    let uploadedSize = 0;
+    let isPaused = false;
+    let controller = null; // 用于取消请求的AbortController
+
+    // DOM元素
+    const fileInput = document.getElementById('fileInput');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const progressBar = document.getElementById('progressBar');
+    const statusDiv = document.getElementById('status');
+
+    // 监听文件选择
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        file = e.target.files[0];
+        fileSize = file.size;
+        fileName = file.name;
+
+        // 计算总分片数
+        totalChunks = Math.ceil(fileSize / chunkSize);
+
+        // 重置上传状态
+        resetUploadStatus();
+
+        // 更新UI
+        statusDiv.textContent = `已选择文件: ${fileName} (${formatFileSize(fileSize)})`;
+        uploadBtn.disabled = false;
+      }
+    });
+
+    // 上传按钮点击事件
+    uploadBtn.addEventListener('click', async () => {
+      if (!file) {
+        alert('请先选择文件');
+        return;
+      }
+
+      // 禁用上传按钮，启用暂停按钮
+      uploadBtn.disabled = true;
+      pauseBtn.disabled = false;
+
+      // 计算文件哈希（用于断点续传）
+      statusDiv.textContent = '正在计算文件哈希...';
+      fileHash = await calculateFileHash(file);
+      statusDiv.textContent = `文件哈希计算完成: ${fileHash}`;
+
+      // 检查服务器是否已有部分分片
+      const uploadedChunksInfo = await checkUploadedChunks(fileName, fileHash);
+      uploadedChunks = uploadedChunksInfo.uploadedChunks || 0;
+      uploadedSize = uploadedChunks * chunkSize;
+
+      // 更新进度条
+      updateProgress();
+
+      // 开始上传
+      isPaused = false;
+      await uploadFile();
+    });
+
+    // 暂停按钮点击事件
+    pauseBtn.addEventListener('click', () => {
+      isPaused = true;
+      if (controller) {
+        controller.abort(); // 中止当前请求
+      }
+      pauseBtn.disabled = true;
+      resumeBtn.disabled = false;
+      statusDiv.textContent = '上传已暂停';
+    });
+
+    // 继续按钮点击事件
+    resumeBtn.addEventListener('click', () => {
+      isPaused = false;
+      pauseBtn.disabled = false;
+      resumeBtn.disabled = true;
+      statusDiv.textContent = '继续上传...';
+      uploadFile();
+    });
+
+    /**
+     * 重置上传状态
+     */
+    function resetUploadStatus() {
+      uploadedChunks = 0;
+      uploadedSize = 0;
+      isPaused = false;
+      progressBar.style.width = '0%';
+      progressBar.textContent = '0%';
+      pauseBtn.disabled = true;
+      resumeBtn.disabled = true;
+    }
+
+    /**
+     * 更新进度条
+     */
+    function updateProgress() {
+      const progress = Math.min(100, (uploadedSize / fileSize) * 100);
+      progressBar.style.width = `${progress}%`;
+      progressBar.textContent = `${progress.toFixed(2)}%`;
+    }
+
+    /**
+     * 计算文件哈希（使用SHA-256算法）
+     * @param {File} file 
+     * @returns {Promise<string>} 文件哈希
+     */
+    async function calculateFileHash(file) {
+      return new Promise((resolve) => {
+        // 为了简化演示，这里使用文件名+大小作为哈希
+        // 实际项目中应该使用更可靠的哈希算法如SHA-256
+        setTimeout(() => {
+          resolve(`${file.name}-${file.size}`);
+        }, 500);
+      });
+
+      // 实际项目中可以使用以下代码计算SHA-256哈希
+      /*
+      const buffer = await file.arrayBuffer();
+      const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      return hashHex;
+      */
+    }
+
+    /**
+     * 检查服务器已上传的分片
+     * @param {string} fileName 
+     * @param {string} fileHash 
+     * @returns {Promise<{uploadedChunks: number}>}
+     */
+    async function checkUploadedChunks(fileName, fileHash) {
+      try {
+        const response = await fetch('/api/check-upload', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            fileName,
+            fileHash,
+            chunkSize
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error('检查上传状态失败');
+        }
+
+        return await response.json();
+      } catch (error) {
+        console.error('检查上传状态出错:', error);
+        return { uploadedChunks: 0 };
+      }
+    }
+
+    /**
+     * 上传文件
+     */
+    async function uploadFile() {
+      // 从已上传的分片数开始
+      let chunkIndex = uploadedChunks;
+
+      while (chunkIndex < totalChunks && !isPaused) {
+        // 计算当前分片的起始和结束位置
+        const start = chunkIndex * chunkSize;
+        const end = Math.min(fileSize, start + chunkSize);
+        const chunk = file.slice(start, end);
+
+        // 创建FormData对象，包含分片数据和其他元数据
+        const formData = new FormData();
+        formData.append('file', chunk);
+        formData.append('fileName', fileName);
+        formData.append('fileHash', fileHash);
+        formData.append('chunkIndex', chunkIndex.toString());
+        formData.append('totalChunks', totalChunks.toString());
+        formData.append('chunkSize', chunkSize.toString());
+        formData.append('fileSize', fileSize.toString());
+
+        try {
+          // 创建新的AbortController用于当前请求
+          controller = new AbortController();
+
+          // 上传分片
+          statusDiv.textContent = `上传分片 ${chunkIndex + 1}/${totalChunks}...`;
+          const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal
+          });
+
+          if (!response.ok) {
+            throw new Error(`上传分片 ${chunkIndex} 失败`);
+          }
+
+          // 更新上传状态
+          uploadedChunks++;
+          uploadedSize = Math.min(uploadedSize + chunkSize, fileSize);
+          chunkIndex++;
+
+          // 更新进度条
+          updateProgress();
+        } catch (error) {
+          if (error.name === 'AbortError') {
+            // 请求被中止（用户点击暂停）
+            console.log('上传已中止');
+          } else {
+            console.error('上传出错:', error);
+            statusDiv.textContent = `上传出错: ${error.message}`;
+            // 可以选择重试当前分片
+            // 这里简单暂停上传
+            isPaused = true;
+            pauseBtn.disabled = true;
+            resumeBtn.disabled = false;
+          }
+          break;
+        }
+      }
+
+      // 检查是否全部上传完成
+      if (uploadedChunks === totalChunks) {
+        statusDiv.textContent = '文件上传完成！';
+        pauseBtn.disabled = true;
+        resumeBtn.disabled = true;
+
+        // 通知服务器合并分片
+        try {
+          statusDiv.textContent = '正在合并文件...';
+          const response = await fetch('/api/merge', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              fileName,
+              fileHash,
+              totalChunks,
+              chunkSize,
+              fileSize
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error('合并文件失败');
+          }
+
+          const result = await response.json();
+          statusDiv.textContent = `文件上传并合并成功: ${result.filePath}`;
+        } catch (error) {
+          console.error('合并文件出错:', error);
+          statusDiv.textContent = `上传完成但合并失败: ${error.message}`;
+        }
+      }
+    }
+
+    /**
+     * 格式化文件大小
+     * @param {number} bytes 
+     * @returns {string}
+     */
+    function formatFileSize(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+  </script>
+</body>
+
+</html>
